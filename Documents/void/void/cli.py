@@ -13,6 +13,7 @@ import sys
 
 from void.agent import run
 from void.config import get_api_key, get_base_url, get_model_name, set_key as set_key_func, get, load, ensure_home
+from void.providers import get_current_model, set_current_model
 from void.model import Model, MissingApiKeyError
 from void.model_commands import (
     cmd_model_list, cmd_model_set, cmd_model_show,
@@ -392,6 +393,7 @@ def cmd_chat(args) -> None:
     print(start_screen())
     print(section_divider())
     messages: list[dict] = []
+    current_model_name = get_current_model() or "unknown"
     try:
         while True:
             prompt = prompt_text("")
@@ -401,14 +403,31 @@ def cmd_chat(args) -> None:
                 break
             if not line.strip():
                 continue
+
+            # Model switching: /model <provider/model>
+            if line.strip().startswith("/model "):
+                new_model = line.strip()[7:].strip()
+                if new_model:
+                    set_current_model(new_model)
+                    args.model = new_model
+                    model = build_model(args)
+                    current_model_name = new_model
+                    print(ok(f"Switched to model: {new_model}"))
+                else:
+                    print(warn(f"Current model: {current_model_name}"))
+                    print(dim("  Usage: /model <provider/model>"))
+                print(section_divider())
+                continue
+
             messages.append({"role": "user", "content": line})
             answer = run(model, messages, max_turns=args.max_turns)
             print(answer)
+            print(gd(f"  model: {current_model_name}  |  /model <name> to switch  |  Ctrl-D to quit"))
             print(section_divider())
             messages.append({"role": "assistant", "content": answer})
     except KeyboardInterrupt:
         print()
-    print()
+        print()
 
 
 def build_model(args) -> Model:
@@ -767,6 +786,35 @@ def cmd_status(args) -> None:
     cmd_stub("status", args)
 
 
+def cmd_upgrade(args) -> None:
+    """Upgrade void: pull latest code + reinstall."""
+    import subprocess, sys
+    from void.config import load
+
+    print(dim("Upgrading void..."))
+
+    # 1. Git pull
+    result = subprocess.run(
+        ["git", "pull"],
+        capture_output=True, text=True, timeout=60
+    )
+    if result.returncode != 0:
+        print(err(f"git pull failed: {result.stderr.strip()}"))
+        sys.exit(1)
+    print(ok("git pull: done"))
+
+    # 2. Reinstall (editable — just refresh metadata)
+    result = subprocess.run(
+        [sys.executable, "-m", "pip", "install", "-e", "."],
+        capture_output=True, text=True, timeout=120
+    )
+    if result.returncode != 0:
+        print(err(f"pip install failed: {result.stderr.strip()}"))
+        sys.exit(1)
+    print(ok("pip install: done"))
+    print(ok("Upgrade complete. Restart void to use new version."))
+
+
 # ═══════════════════════════════════════════════════════════════════
 # MAIN
 # ═══════════════════════════════════════════════════════════════════
@@ -795,6 +843,7 @@ _COMMAND_DISPATCH = {
     "logs":       cmd_logs,
     "doctor":     cmd_doctor,
     "status":     cmd_status,
+    "upgrade":    cmd_upgrade,
 }
 
 
@@ -831,6 +880,9 @@ def main() -> None:
     cfg_sub.add_parser("show", help="Show full config (keys masked)")
     cfg.add_argument("--show", action="store_true", help="Show full config (flags form)")
     cfg.add_argument("--get", dest="get_key_opt", type=str, help="Get a specific key (flags form)")
+
+    # ── upgrade ──
+    sub.add_parser("upgrade", help="Upgrade void (git pull + pip install)")
 
     # ── setup ──
     sub.add_parser("setup", help="Interactive setup wizard")

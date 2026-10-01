@@ -37,7 +37,11 @@ class Model:
         self._client = OpenAI(**kwargs)
 
     def chat(self, messages: list[dict], tools: list[dict] | None = None) -> "ChatResponse":
+        from void.config import get
         kwargs: dict = {"model": self.model_name, "messages": messages}
+        max_tokens = get("max_tokens")
+        if max_tokens:
+            kwargs["max_tokens"] = int(max_tokens)
         if tools:
             kwargs["tools"] = tools
         resp = self._client.chat.completions.create(**kwargs)

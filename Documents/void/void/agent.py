@@ -7,6 +7,27 @@ from void.tools.registry import get_schemas, dispatch
 from void.commands.skills_cmd import discover_skills
 
 
+def _is_install_command(command: str) -> bool:
+    """Check if a shell command is an install operation."""
+    install_patterns = [
+        "pip install", "pip3 install", "npm install", "yarn add",
+        "apt install", "apt-get install", "brew install", "choco install",
+        "gem install", "cargo install", "go install", "docker pull",
+    ]
+    cmd_lower = command.lower().strip()
+    return any(p in cmd_lower for p in install_patterns)
+
+
+def _ask_permission(prompt: str) -> bool:
+    """Ask user for permission. Returns True if allowed."""
+    import sys
+    try:
+        answer = input(f"\n  {prompt}\n  Allow? (y/N): ").strip().lower()
+        return answer == "y"
+    except (EOFError, KeyboardInterrupt):
+        return False
+
+
 def run(model: Model, messages: list[dict], max_turns: int = 20) -> str:
     """Run the agent loop.
 
@@ -40,6 +61,16 @@ def run(model: Model, messages: list[dict], max_turns: int = 20) -> str:
             for tc in resp.tool_calls:
                 name = tc.function.name
                 args = json.loads(tc.function.arguments)
+                # Ask permission for install commands
+                if name == "system_shell" and _is_install_command(args.get("command", "")):
+                    if not _ask_permission(f"Install command: {args['command']}"):
+                        result = '{"error": "permission denied by user"}'
+                        messages.append({
+                            "role": "tool",
+                            "tool_call_id": tc.id,
+                            "content": result,
+                        })
+                        continue
                 result = dispatch(name, args)
                 messages.append({
                     "role": "tool",
