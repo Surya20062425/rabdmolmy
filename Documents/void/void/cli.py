@@ -15,9 +15,13 @@ from void.agent import run
 from void.config import get_api_key, get_base_url, get_model_name, set_key as set_key_func, get, load, ensure_home
 from void.providers import get_current_model, set_current_model
 from void.model import Model, MissingApiKeyError
-from void.model_commands import (
+from void.commands.model_cmd import (
     cmd_model_list, cmd_model_set, cmd_model_show,
+)
+from void.commands.auth_cmd import (
     cmd_auth_add, cmd_auth_list, cmd_auth_remove, cmd_auth_status,
+)
+from void.commands.fallback_cmd import (
     cmd_fallback_list, cmd_fallback_add, cmd_fallback_remove, cmd_fallback_set,
 )
 from void.commands.sessions_cmd import main as sessions_main
