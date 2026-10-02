@@ -192,10 +192,18 @@ def update_skill(skill_id: str, repo: str | None = None) -> dict | None:
 
 
 def search_skills(query: str) -> list[dict]:
-    """Search installed skills by keyword."""
-    skills = discover_skills()
+    """Search installed + catalog skills by keyword."""
     q = query.lower()
-    return [s for s in skills if q in s["name"].lower() or q in s.get("description", "").lower()]
+    installed = discover_skills()
+    hits = [s for s in installed if q in s["name"].lower() or q in s.get("description", "").lower()]
+    seen = {s["id"] for s in hits}
+    from void.skills_catalog import SKILLS
+    for name, info in SKILLS.items():
+        if name in seen:
+            continue
+        if q in name.lower() or q in info["description"].lower() or q in info["trigger"].lower():
+            hits.append({"id": name, "name": name, "description": info["description"], "tools": info["tools"]})
+    return hits
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -224,23 +232,20 @@ def cmd_skills_list(args) -> None:
 
 
 def cmd_skills_browse(args) -> None:
-    from void.theme import header, dim, green, green_bold, DASH
+    from void.theme import header, dim, green, green_bold, grey, DASH
+    from void.skills_catalog import SKILLS
 
     print(header("Skill Catalog", 1))
-    print(dim("The skill catalog is coming soon."))
-    print()
-    print(green("Built-in skill template:"))
-    print()
-    print(f"  {green_bold('SKILL.md')}")
-    print()
-    print(green("name: \"my-skill\""))
-    print(green("description: \"What this skill does\""))
-    print(green("version: \"0.1.0\""))
-    print(green("tools:"))
-    print(dim("  - my_tool"))
-    print()
-    print(dim(f"Content goes here {DASH} markdown injected into the system prompt."))
-    print()
+    print(f"  {len(SKILLS)} skills available.\n")
+    cats = {}
+    for name, info in SKILLS.items():
+        tools = info.get("tools", [])
+        key = tools[0] if tools else "other"
+        cats.setdefault(key, []).append(name)
+    for key, names in sorted(cats.items()):
+        print(f"  {green_bold(key)}  {grey(f'({len(names)})')}")
+        print(f"    {dim(', '.join(names))}")
+        print()
 
 
 def cmd_skills_search(args) -> None:

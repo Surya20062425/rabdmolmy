@@ -1,10 +1,15 @@
 """Agent loop — call model, dispatch tools, round-trip until text."""
 
 import json
+import threading
+import sys
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 from void.model import Model
+from void.theme import thinking, spinner_frame, gb, g, gd
 from void.tools.registry import get_schemas, dispatch
 from void.commands.skills_cmd import discover_skills
+from void.skills_catalog import match_skills, SKILLS as CATALOG
 
 
 def _is_install_command(command: str) -> bool:
@@ -20,7 +25,6 @@ def _is_install_command(command: str) -> bool:
 
 def _ask_permission(prompt: str) -> bool:
     """Ask user for permission. Returns True if allowed."""
-    import sys
     try:
         answer = input(f"\n  {prompt}\n  Allow? (y/N): ").strip().lower()
         return answer == "y"
@@ -39,77 +43,115 @@ def run(model: Model, messages: list[dict], max_turns: int = 20) -> str:
     tools = get_schemas()
     # Inject installed skills as system context
     _inject_skills(messages)
-    for _ in range(max_turns):
-        resp = model.chat(messages, tools=tools if tools else None)
-        if resp.tool_calls:
-            # OpenAI requires the assistant tool_calls message BEFORE any tool result.
-            assistant_msg = {
-                "role": "assistant",
-                "tool_calls": [
-                    {
-                        "id": tc.id,
-                        "type": "function",
-                        "function": {
-                            "name": tc.function.name,
-                            "arguments": tc.function.arguments,
-                        },
-                    }
-                    for tc in resp.tool_calls
-                ],
-            }
-            messages.append(assistant_msg)
-            for tc in resp.tool_calls:
-                name = tc.function.name
-                args = json.loads(tc.function.arguments)
-                # Ask permission for install commands
-                if name == "system_shell" and _is_install_command(args.get("command", "")):
-                    if not _ask_permission(f"Install command: {args['command']}"):
-                        result = '{"error": "permission denied by user"}'
-                        messages.append({
-                            "role": "tool",
-                            "tool_call_id": tc.id,
-                            "content": result,
-                        })
-                        continue
-                result = dispatch(name, args)
-                messages.append({
-                    "role": "tool",
-                    "tool_call_id": tc.id,
-                    "content": result,
-                })
+    print(thinking(), end="\r", flush=True)
+    result = None
+    _done = threading.Event()
+
+    def _spin():
+        i = 0
+        while not _done.is_set():
+            print(spinner_frame(i), end="\r", flush=True)
+            i += 1
+            _done.wait(0.1)
+
+    t = threading.Thread(target=_spin, daemon=True)
+    t.start()
+    try:
+        for _ in range(max_turns):
+            resp = model.chat(messages, tools=tools if tools else None)
+            if resp.tool_calls:
+                assistant_msg = {
+                    "role": "assistant",
+                    "tool_calls": [
+                        {
+                            "id": tc.id,
+                            "type": "function",
+                            "function": {
+                                "name": tc.function.name,
+                                "arguments": tc.function.arguments,
+                            },
+                        }
+                        for tc in resp.tool_calls
+                    ],
+                }
+                messages.append(assistant_msg)
+                for tc in resp.tool_calls:
+                    name = tc.function.name
+                    args = json.loads(tc.function.arguments)
+                    if name == "system_shell" and _is_install_command(args.get("command", "")):
+                        _done.clear()  # pause spinner so input() is readable
+                        allowed = _ask_permission(f"Install command: {args['command']}")
+                        _done.set()    # resume spinner
+                        if not allowed:
+                            result = '{"error": "permission denied by user"}'
+                            messages.append({
+                                "role": "tool",
+                                "tool_call_id": tc.id,
+                                "content": result,
+                            })
+                            continue
+                    _done.clear()
+                    result = dispatch(name, args)
+                    _done.set()
+                    messages.append({
+                        "role": "tool",
+                        "tool_call_id": tc.id,
+                        "content": result,
+                    })
+            else:
+                result = resp.content or ""
+                break
         else:
-            return resp.content or ""
-    return "max turns reached — no final answer"
+            result = "max turns reached — no final answer"
+    finally:
+        _done.set()
+        t.join()
+        print(" " * 40, end="\r", flush=True)
+    return result
 
 
 def _inject_skills(messages: list[dict]) -> None:
-    """Prepend installed skills as system context to the message list."""
-    skills = discover_skills()
-    if not skills:
-        return
+    """Prepend installed skills + catalog skills matching context as system context."""
     parts = []
+    # Installed skills
+    skills = discover_skills()
     for s in skills:
         path = s.get("path")
         if not path:
             continue
-        from pathlib import Path
         try:
             content = Path(path).read_text(encoding="utf-8")
         except Exception:
             continue
-        parts.append(f"Skill: {s['name']}\\n{content}")
+        parts.append(f"Skill: {s['name']}\n{content}")
+    # Catalog: inject matching skills based on last user message
+    if messages:
+        last = messages[-1].get("content", "").lower()
+        for name, info in CATALOG.items():
+            if _matches(last, info["trigger"]):
+                parts.append(f"Skill: {name}\n{info['description']}")
     if not parts:
         return
-    system_text = "\\n\\n---\\n\\n".join(parts)
-    # Insert after the system message or at the front
+    system_text = "\n\n---\n\n".join(parts)
     inserted = False
     for i, m in enumerate(messages):
         if m.get("role") == "system":
-            messages[i] = {"role": "system", "content": m.get("content", "") + "\\n\\n" + system_text}
+            messages[i] = {"role": "system", "content": m.get("content", "") + "\n\n" + system_text}
             inserted = True
             break
     if not inserted:
         messages.insert(0, {"role": "system", "content": system_text})
+
+
+def _matches(text: str, trigger: str) -> bool:
+    """True if a distinctive trigger word appears in the text."""
+    stop = {
+        "the", "a", "an", "and", "or", "to", "for", "of", "in", "on", "my", "me", "it", "is",
+        "search", "write", "make", "create", "build", "add", "get", "set", "use", "code",
+        "file", "files", "text", "data", "full", "all", "new", "with", "from", "into",
+    }
+    words = [w.strip(".,!?:;") for w in trigger.lower().replace(",", " ").split()]
+    return any(len(w) > 3 and w not in stop and w in text for w in words)
 
 
 def demo() -> None:
