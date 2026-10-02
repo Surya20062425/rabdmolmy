@@ -11,8 +11,10 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import threading
 
 from void.agent import run
+from void import inbox as _inbox
 from void.config import get_api_key, get_base_url, get_model_name, set_key as set_key_func, get, load, ensure_home
 from void.providers import get_current_model, set_current_model
 from void.model import Model, MissingApiKeyError
@@ -420,6 +422,34 @@ def cmd_chat(args) -> None:
         print(section_divider())
 
     current_model_name = get_current_model() or "unknown"
+
+    # The agent runs in a background thread so the terminal keeps accepting
+    # input while it works. A task typed mid-run is queued to the inbox and the
+    # loop picks it up between turns -- the terminal never blocks or dies.
+    worker: dict = {"thread": None}
+    turn_lock = threading.Lock()
+    print(green_dim("  type a task any time, even mid-run -- it queues and runs next"))
+
+    def _agent_thread(task: str) -> None:
+        try:
+            if sid is None:
+                pass
+            answer = run(model, messages, max_turns=args.max_turns, quiet=True)
+            with turn_lock:
+                print()
+                print(answer)
+                _persist(sid, "assistant", answer)
+                messages.append({"role": "assistant", "content": answer})
+                print(green_dim(f"  session: {sid[:8]}  |  /model <name>  |  Ctrl-D to quit"))
+                print(section_divider())
+                print(prompt_text(""), end="", flush=True)
+        except Exception as e:
+            with turn_lock:
+                print()
+                print(err(f"agent error: {e}"))
+        finally:
+            worker["thread"] = None
+
     try:
         while True:
             prompt = prompt_text("")
@@ -445,20 +475,36 @@ def cmd_chat(args) -> None:
                 print(section_divider())
                 continue
 
+            busy = worker["thread"] is not None and worker["thread"].is_alive()
+
+            if busy:
+                # Agent is mid-task: queue this as a new task instead of blocking.
+                _inbox.submit(line)
+                print(ok(f"queued ({_inbox.count()} waiting) — runs after the current task"))
+                continue
+
+            # Idle with work waiting (queued via `void queue add` or a line that
+            # landed while nothing was running) -- drain it so it can't get stuck.
+            for item in _inbox.pending():
+                messages.append({"role": "user", "content": item["task"]})
+                if sid:
+                    _persist(sid, "user", item["task"])
+                print(dim(f"  picked up queued task: {item['task'][:50]}"))
+
             if sid is None:
                 sid = _new_session(line)
             messages.append({"role": "user", "content": line})
             _persist(sid, "user", line)
-            answer = run(model, messages, max_turns=args.max_turns)
-            print(answer)
-            _persist(sid, "assistant", answer)
-            print(green_dim(f"  session: {sid[:8]}  |  /model <name> to switch  |  Ctrl-D to quit"))
-            print(section_divider())
-            messages.append({"role": "assistant", "content": answer})
+            th = threading.Thread(target=_agent_thread, args=(line,), daemon=True)
+            worker["thread"] = th
+            th.start()
     except KeyboardInterrupt:
         print()
         print()
     finally:
+        th = worker.get("thread")
+        if th is not None and th.is_alive():
+            th.join(timeout=30)
         if sid:
             print(green_dim(f"  saved: {sid[:8]}  (void sessions list)"))
 
@@ -718,6 +764,30 @@ def cmd_cron(args) -> None:
         args.subcommand = sc
     cron_main(args)
 
+def cmd_queue(args) -> None:
+    """Queue a task for a running agent, or inspect the inbox."""
+    sc = getattr(args, "queue_subcommand", "list")
+    from void.commands.system_cmd import _store, _save_store, _now
+
+    if sc == "list":
+        n = _inbox.count()
+        print(header("Task Inbox", 1))
+        if n == 0:
+            print(grey("Empty. void queue add 'do X next'"))
+            return
+        print(f"  {n} task(s) waiting. The running agent picks these up between turns.")
+        return
+    if sc == "add":
+        _inbox.submit(args.task)
+        print(ok(f"Queued: {args.task[:60]}"))
+        print(dim(f"  {_inbox.count()} task(s) in inbox"))
+        return
+    if sc == "clear":
+        n = len(_inbox.pending())
+        print(ok(f"Cleared {n} task(s)") if n else grey("Inbox already empty."))
+        return
+
+
 def cmd_webhooks(args) -> None:
     """Webhook routes: named endpoints that fire a prompt (local registry)."""
     sc = getattr(args, "webhooks_subcommand", "list")
@@ -957,6 +1027,7 @@ def cmd_upgrade(args) -> None:
 
 _COMMAND_DISPATCH = {
     "chat":       cmd_chat,
+    "queue":      cmd_queue,
     "config":     cmd_config,
     "setup":      cmd_setup,
     "model":      cmd_model,
@@ -1001,6 +1072,14 @@ def main() -> None:
     chat.add_argument("--max-turns", type=int, default=20, help="Tool-call cap")
     chat.add_argument("-q", "--query", type=str, help="One-shot query")
     chat.add_argument("--resume", type=str, help="Resume a past session by ID")
+
+    # ── queue (task inbox) ──
+    qp = sub.add_parser("queue", help="Queue a task for a running agent")
+    qsub = qp.add_subparsers(dest="queue_subcommand", required=True)
+    qsub.add_parser("list", help="Show how many tasks are queued")
+    q_add = qsub.add_parser("add", help="Queue a task")
+    q_add.add_argument("task", help="Task text")
+    qsub.add_parser("clear", help="Empty the inbox")
 
     # ── config ──
     cfg = sub.add_parser("config", help="View and edit config")

@@ -1,6 +1,7 @@
 """Agent loop — call model, dispatch tools, round-trip until text."""
 
 import json
+import re
 import threading
 import sys
 from pathlib import Path
@@ -10,6 +11,7 @@ from void.theme import thinking, spinner_frame, gb, g, gd
 from void.tools.registry import get_schemas, dispatch
 from void.commands.skills_cmd import discover_skills
 from void.skills_catalog import match_skills, SKILLS as CATALOG
+from void import inbox as _inbox
 
 
 def _is_install_command(command: str) -> bool:
@@ -24,26 +26,37 @@ def _is_install_command(command: str) -> bool:
 
 
 def _ask_permission(prompt: str) -> bool:
-    """Ask user for permission. Returns True if allowed."""
+    """Ask user for permission. Returns True if allowed.
+
+    Only prompts when there's a real interactive TTY. Inside a background
+    thread (the REPL runs the agent there) stdin isn't ours to read -- blocking
+    on input() there hangs or kills the session, so deny instead.
+    """
+    if not sys.stdin.isatty() or threading.current_thread() is not threading.main_thread():
+        return False
     try:
         answer = input(f"\n  {prompt}\n  Allow? (y/N): ").strip().lower()
         return answer == "y"
-    except (EOFError, KeyboardInterrupt):
+    except (EOFError, KeyboardInterrupt, OSError):
         return False
 
 
-def run(model: Model, messages: list[dict], max_turns: int = 20) -> str:
+def run(model: Model, messages: list[dict], max_turns: int = 20, quiet: bool = False) -> str:
     """Run the agent loop.
 
     1. Call model with messages + available tool schemas.
     2. If tool_calls → dispatch each, append tool results, continue.
     3. If text → return it.
     4. Bail after max_turns.
+
+    quiet=True suppresses the spinner (used when the loop runs in the
+    background while the terminal keeps accepting input).
     """
     tools = get_schemas()
     # Inject installed skills as system context
     _inject_skills(messages)
-    print(thinking(), end="\r", flush=True)
+    if not quiet:
+        print(thinking(), end="\r", flush=True)
     result = None
     _done = threading.Event()
 
@@ -55,9 +68,16 @@ def run(model: Model, messages: list[dict], max_turns: int = 20) -> str:
             _done.wait(0.1)
 
     t = threading.Thread(target=_spin, daemon=True)
-    t.start()
+    if not quiet:
+        t.start()
     try:
         for _ in range(max_turns):
+            # Fold in anything the user queued while we were working, so a new
+            # task is picked up between turns instead of being lost.
+            for item in _inbox.pending():
+                messages.append({"role": "user", "content": item["task"]})
+                _log("inbox", f"picked up task: {item['task'][:120]}")
+
             resp = model.chat(messages, tools=tools if tools else None)
             if resp.tool_calls:
                 assistant_msg = {
@@ -77,7 +97,22 @@ def run(model: Model, messages: list[dict], max_turns: int = 20) -> str:
                 messages.append(assistant_msg)
                 for tc in resp.tool_calls:
                     name = tc.function.name
-                    args = json.loads(tc.function.arguments)
+                    # Models do emit malformed JSON args, especially with large
+                    # contexts. Never let that kill the loop -- feed the error
+                    # back so the model can correct itself.
+                    try:
+                        args = json.loads(tc.function.arguments or "{}")
+                        if not isinstance(args, dict):
+                            raise ValueError(f"arguments must be an object, got {type(args).__name__}")
+                    except (json.JSONDecodeError, ValueError) as e:
+                        result = json.dumps({"error": f"invalid tool arguments: {e}"})
+                        _log("error", f"{name} bad args: {e}")
+                        messages.append({
+                            "role": "tool",
+                            "tool_call_id": tc.id,
+                            "content": result,
+                        })
+                        continue
                     if name == "system_shell" and _is_install_command(args.get("command", "")):
                         _done.clear()  # pause spinner so input() is readable
                         allowed = _ask_permission(f"Install command: {args['command']}")
@@ -101,6 +136,11 @@ def run(model: Model, messages: list[dict], max_turns: int = 20) -> str:
                     })
             else:
                 result = resp.content or ""
+                # A task may have arrived while we were composing this answer.
+                # Don't stop -- fold it in and keep going.
+                if _inbox.count():
+                    messages.append({"role": "assistant", "content": result})
+                    continue
                 break
         else:
             result = "max turns reached — no final answer"
@@ -109,8 +149,9 @@ def run(model: Model, messages: list[dict], max_turns: int = 20) -> str:
         raise
     finally:
         _done.set()
-        t.join()
-        print(" " * 40, end="\r", flush=True)
+        if not quiet:
+            t.join()
+            print(" " * 40, end="\r", flush=True)
     return result
 
 
@@ -145,17 +186,22 @@ def _inject_skills(messages: list[dict]) -> None:
     #    so they survive the size cap below.
     if VOID_SKILLS_DIR.exists():
         for d in VOID_SKILLS_DIR.iterdir():
-            if not d.is_dir() or len(d.name) < 4:
+            if not d.is_dir():
                 continue
-            if d.name.replace("-", " ") in last or d.name in last:
-                md = d / "SKILL.md"
-                if not md.exists():
-                    continue
-                try:
-                    parts.append(f"Skill: {d.name}\n{md.read_text(encoding='utf-8')}")
-                    seen.add(d.name)
-                except OSError:
-                    continue
+            # Match the skill name as a whole word, so 'pdf' hits "use the pdf
+            # skill" but never matches inside "pdfs" or another word. No length
+            # guard -- short names like pdf/docx/xlsx are real skills.
+            words = {d.name, d.name.replace("-", " ")}
+            if not any(re.search(rf"\b{re.escape(w)}\b", last) for w in words):
+                continue
+            md = d / "SKILL.md"
+            if not md.exists():
+                continue
+            try:
+                parts.append(f"Skill: {d.name}\n{md.read_text(encoding='utf-8')}")
+                seen.add(d.name)
+            except OSError:
+                continue
 
     # 2. Catalog skills matching a trigger
     for name, info in CATALOG.items():
