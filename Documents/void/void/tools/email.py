@@ -154,12 +154,24 @@ def email_read(uid, folder="INBOX", label="default",
         return {"error": str(e)}
 
 
+def _smtp_host_for(imap_host: str) -> str:
+    """Derive an SMTP host from an IMAP host.
+
+    IMAP and SMTP live on different hostnames (imap.gmail.com vs
+    smtp.gmail.com), so reusing the IMAP host fails TLS hostname checks.
+    """
+    h = (imap_host or "").strip()
+    if h.startswith("imap."):
+        return "smtp." + h[5:]
+    return h
+
+
 def email_send(to, subject, body, cc=None, bcc=None, label="default",
                smtp_host=None, smtp_port=587, smtp_user=None, smtp_pass=None,
                imap_host=None, imap_port=993, imap_user=None, imap_pass=None):
     """Send an email. Caches SMTP + IMAP creds under the same label."""
     c = _get_creds(label) if not smtp_host else {}
-    shost = smtp_host or c.get("smtp_host") or c.get("imap_host")
+    shost = smtp_host or c.get("smtp_host") or _smtp_host_for(c.get("imap_host"))
     sport = smtp_port or c.get("smtp_port", 587)
     suser = smtp_user or c.get("smtp_user") or c.get("imap_user")
     spass = smtp_pass or c.get("smtp_pass") or c.get("imap_pass")

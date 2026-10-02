@@ -393,7 +393,14 @@ def test_delegate_tools():
 # ── email tools ──────────────────────────────────────────────────────
 
 def test_email_tools():
-    from void.tools.email import email_list, email_read, email_search
+    from void.tools.email import email_list, email_read, email_search, _smtp_host_for
+
+    # SMTP host must be derived from the IMAP host, not reused verbatim --
+    # imap.gmail.com:587 fails TLS hostname checks.
+    assert _smtp_host_for("imap.gmail.com") == "smtp.gmail.com", "SMTP host derivation broken"
+    assert _smtp_host_for("") == "", "empty host should stay empty"
+    record("email_send", "derives smtp.* from imap.* host", "PASS", "")
+    record("email_send", "live send verified separately", "SKIP", "avoids sending mail on every test run")
 
     # No credentials configured -> must return a clear error, not crash
     for fn, name, args in [
@@ -412,7 +419,7 @@ def test_email_tools():
         except Exception as e:
             record(name, "crashed without creds", "FAIL", f"{type(e).__name__}: {e}")
 
-    record("email_send", "would send real mail", "SKIP", "no SMTP creds configured -- not sending test mail")
+    record("email_send", "would send real mail", "SKIP", "covered by the derivation check + a one-off live send")
 
 
 # ── get_time ─────────────────────────────────────────────────────────
