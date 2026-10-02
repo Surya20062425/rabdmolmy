@@ -88,15 +88,30 @@ check("void cron list", ["cron", "list"], must_not_contain=BANNED)
 out = check("void cron create 60m 'cmd test'", ["cron", "create", "60m", "cmd test"], must_contain=["Created"], must_not_contain=BANNED)
 import re
 m = re.search(r"Created job (\w+)", out)
-job_id = m.group(1) if m else None
-if job_id:
-    full = None
-    code, o = run(["-c", f"from void.commands.cron_cmd import list_jobs; print([j['id'] for j in list_jobs() if j['id'].startswith('{job_id}')][0])"])
-    full = o.strip() if code == 0 else None
-    if full:
+short = m.group(1) if m else None
+
+if not short:
+    RESULTS.append(("cron lifecycle", "FAIL", "could not read job id from create output"))
+    print("  [FAIL] cron lifecycle                 could not read job id")
+else:
+    # Resolve the full id from the DB directly (not via the CLI, which has no -c flag).
+    from void.commands.cron_cmd import list_jobs as _list_jobs
+    full = next((j["id"] for j in _list_jobs() if j["id"].startswith(short)), None)
+    if not full:
+        RESULTS.append(("cron lifecycle", "FAIL", f"job {short} not in DB after create"))
+        print(f"  [FAIL] cron lifecycle                 {short} not in DB after create")
+    else:
         check("void cron pause", ["cron", "pause", full], must_contain=["Paused"], must_not_contain=BANNED)
         check("void cron resume", ["cron", "resume", full], must_contain=["Resumed"], must_not_contain=BANNED)
         check("void cron remove", ["cron", "remove", full], must_contain=["Removed"], must_not_contain=BANNED)
+        # the job must actually be gone -- a silent remove would leak jobs forever
+        still = any(j["id"] == full for j in _list_jobs())
+        if still:
+            RESULTS.append(("cron remove actually deletes", "FAIL", f"{short} still in DB"))
+            print(f"  [FAIL] cron remove actually deletes      {short} still in DB")
+        else:
+            RESULTS.append(("cron remove actually deletes", "PASS", ""))
+            print(f"  [PASS] cron remove actually deletes      {short} gone from DB")
 check("void cron status", ["cron", "status"], must_not_contain=BANNED)
 check("void cron tick", ["cron", "tick"], must_not_contain=BANNED)
 check("void cron logs", ["cron", "logs"], must_not_contain=BANNED)
