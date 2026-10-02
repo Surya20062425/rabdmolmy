@@ -8,3 +8,6 @@ __pycache__/
 *.egg-info/
 dist/
 build/
+command_test_results.json
+skill_test_results.json
+tool_test_results.json

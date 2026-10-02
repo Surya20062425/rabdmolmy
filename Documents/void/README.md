@@ -1,6 +1,6 @@
 # void — CLI agent
 
-`/s` — the CLI agent. Hermes-equivalent surface, neon-green branding, full tool + skill + session + cron system.
+`/s` — the CLI agent. Neon-green branding, full tool + skill + session + cron system.
 
 ## Structure
 
@@ -12,7 +12,7 @@ void/
 ├── model.py           # OpenAI-format model client
 ├── sessions.py        # SQLite session store
 ├── providers.py       # Provider config + fallback chain
-├── skills_catalog.py  # 101-skill catalog (matches Hermes skill surface)
+├── skills_catalog.py  # 101-skill catalog
 ├── theme.py           # Terminal theme (neon green #9df133, DM Mono)
 ├── commands/
 │   ├── model_cmd.py   # model list/set/show
@@ -50,7 +50,7 @@ void/
 
 ## Skills — 101 in catalog
 
-`void/skills_catalog.py` mirrors the Hermes skill surface: hermes-core, devops, creative, UI/UX,
+`void/skills_catalog.py` holds the Void skill catalog: void-core, devops, creative, UI/UX,
 software-development, bountyforge, web3, web2, research, productivity, publish, media, email,
 hyperframes, higgsfield. Skills are injected into the system prompt when the user's message
 matches a skill trigger.

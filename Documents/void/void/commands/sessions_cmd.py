@@ -1,7 +1,7 @@
-"""Void sessions commands — Hermes-equivalent session management.
+"""Void sessions — session management.
 
 Sessions stored in SQLite (~/.void/sessions.db).
-Full Hermes surface: list, browse, rename, delete, export, prune, stats.
+Surface: list, browse, rename, delete, export, prune, stats.
 """
 
 from __future__ import annotations

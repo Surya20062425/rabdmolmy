@@ -56,4 +56,5 @@ def get_base_url() -> str | None:
 
 
 def get_model_name() -> str:
-    return get("model") or os.getenv("VOID_MODEL") or "gpt-4o-mini"
+    from void.providers import get_current_model
+    return get_current_model() or os.getenv("VOID_MODEL") or "gpt-4o-mini"

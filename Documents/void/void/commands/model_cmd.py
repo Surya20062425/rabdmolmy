@@ -50,12 +50,55 @@ def cmd_model_list(args) -> None:
 
 
 def cmd_model_set(args) -> None:
-    """Set the current model."""
+    """Set the current model. Prompt to pick if none given."""
     model_spec = args.model
     if not model_spec:
-        print("usage: void model set <provider/model>")
-        print("       void model set gpt-4o-mini  (uses first provider with that model)")
-        return
+        # Interactive picker across all providers
+        providers = list_providers()
+        if not providers:
+            print("No providers configured. Add one with `void auth add <name>`")
+            sys.exit(1)
+        print("Select a provider:\n")
+        names = [n for n, _ in providers]
+        for i, (name, cfg) in enumerate(providers, 1):
+            models = cfg.get("models") or []
+            print(f"  {i}. {name}  ({len(models)} models)")
+        print(f"  0. cancel")
+        choice = input("\nProvider # or name: ").strip()
+        if choice in ("0", "cancel"):
+            print("Cancelled.")
+            return
+        # resolve by number or name
+        provider_cfg = None
+        provider_name = None
+        if choice.isdigit() and 1 <= int(choice) <= len(names):
+            provider_name = names[int(choice) - 1]
+            provider_cfg = get_provider(provider_name)
+        else:
+            for n, c in providers:
+                if n == choice:
+                    provider_name = n
+                    provider_cfg = c
+                    break
+        if not provider_cfg:
+            print(f"Error: unknown provider '{choice}'")
+            sys.exit(1)
+        models = provider_cfg.get("models") or []
+        if not models:
+            print(f"No models configured for '{provider_name}'.")
+            print(f"Edit with: void auth add {provider_name}")
+            sys.exit(1)
+        print(f"\nModels for [{provider_name}]:\n")
+        for i, m in enumerate(models, 1):
+            print(f"  {i}. {m}")
+        mchoice = input("\nModel # or name: ").strip()
+        if mchoice.isdigit() and 1 <= int(mchoice) <= len(models):
+            model_spec = f"{provider_name}/{models[int(mchoice) - 1]}"
+        elif mchoice in models:
+            model_spec = f"{provider_name}/{mchoice}"
+        else:
+            print(f"Error: invalid model choice")
+            sys.exit(1)
 
     if "/" in model_spec:
         provider_name, model_name = model_spec.split("/", 1)

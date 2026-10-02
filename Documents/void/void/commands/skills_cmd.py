@@ -1,4 +1,4 @@
-"""Void skills commands — Hermes-equivalent skill management.
+"""Void skills — skill management.
 
 Skills are SKILL.md files injected into the system prompt.
 Stored in ~/.void/skills/ as individual .md files.
@@ -42,12 +42,21 @@ def _save_registry(reg: dict) -> None:
 
 
 def discover_skills() -> list[dict]:
-    """Discover installed skills from the skills directory."""
+    """Discover installed skills from the skills directory.
+
+    Supports both layouts: registry-tracked flat .md files and vendored
+    <name>/SKILL.md directories.
+    """
     _ensure_skills_dir()
     reg = _load_registry()
     result = []
+    seen = set()
+
     for name, info in reg.items():
         md_path = SKILLS_DIR / f"{name}.md"
+        if not md_path.exists():
+            md_path = SKILLS_DIR / name / "SKILL.md"
+        seen.add(name)
         result.append({
             "id": name,
             "name": info.get("name", name),
@@ -58,6 +67,35 @@ def discover_skills() -> list[dict]:
             "tools": info.get("tools", []),
             "path": str(md_path) if md_path.exists() else None,
         })
+
+    # Vendored skills not in the registry
+    if SKILLS_DIR.exists():
+        for d in sorted(SKILLS_DIR.iterdir()):
+            if not d.is_dir() or d.name in seen:
+                continue
+            md = d / "SKILL.md"
+            if not md.exists():
+                continue
+            desc = ""
+            try:
+                head = md.read_text(encoding="utf-8")[:800]
+                for line in head.splitlines():
+                    if line.lower().startswith("description:"):
+                        desc = line.split(":", 1)[1].strip().strip('"')
+                        break
+            except OSError:
+                pass
+            result.append({
+                "id": d.name,
+                "name": d.name,
+                "version": "0.1.0",
+                "installed_at": "",
+                "source": "vendored",
+                "description": desc,
+                "tools": [],
+                "path": str(md),
+            })
+
     return sorted(result, key=lambda s: s["name"])
 
 
@@ -160,19 +198,32 @@ def uninstall_skill(skill_id: str) -> bool:
 def get_skill(skill_id: str) -> dict | None:
     """Get a skill by ID."""
     reg = _load_registry()
-    if skill_id not in reg:
-        return None
-    info = reg[skill_id]
-    return {
-        "id": skill_id,
-        "name": info.get("name", skill_id),
-        "version": info.get("version", "0.1.0"),
-        "description": info.get("description", ""),
-        "tools": info.get("tools", []),
-        "source": info.get("source", ""),
-        "installed_at": info.get("installed_at", ""),
-        "path": info.get("path", ""),
-    }
+    if skill_id in reg:
+        info = reg[skill_id]
+        return {
+            "id": skill_id,
+            "name": info.get("name", skill_id),
+            "version": info.get("version", "0.1.0"),
+            "description": info.get("description", ""),
+            "tools": info.get("tools", []),
+            "source": info.get("source", ""),
+            "installed_at": info.get("installed_at", ""),
+            "path": info.get("path", ""),
+        }
+    # Fall back to a vendored skill (<name>/SKILL.md) not tracked in the registry
+    for s in discover_skills():
+        if s["id"] == skill_id:
+            return {
+                "id": skill_id,
+                "name": s["name"],
+                "version": s["version"],
+                "description": s["description"],
+                "tools": s["tools"],
+                "source": s["source"],
+                "installed_at": s["installed_at"],
+                "path": s["path"] or "",
+            }
+    return None
 
 
 def update_skill(skill_id: str, repo: str | None = None) -> dict | None:

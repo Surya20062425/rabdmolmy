@@ -1,4 +1,4 @@
-"""Void cron commands — Hermes-equivalent scheduled jobs.
+"""Void cron — scheduled jobs that run the agent.
 
 Jobs stored in SQLite. Supports intervals (30m, every 2h) and cron expressions (0 9 * * *).
 """
@@ -205,23 +205,70 @@ def resume_job(job_id: str) -> dict | None:
 
 
 def run_job(job_id: str, prompt_override: str | None = None) -> dict | None:
-    """Manually trigger a job. Mark it as having run now."""
+    """Execute a job: run the prompt through the agent, store the result."""
     job = get_job(job_id)
     if not job:
         return None
 
+    prompt = prompt_override or job["prompt"]
+    result_text = ""
+    try:
+        from void.cli import build_model
+        from void.agent import run as agent_run
+        import argparse
+
+        args = argparse.Namespace(api_key=None, base_url=None, model=None)
+        model = build_model(args)
+        result_text = agent_run(model, [{"role": "user", "content": prompt}])
+    except Exception as e:
+        result_text = f"ERROR: {e}"
+
     conn = _conn()
     try:
         now = datetime.now(timezone.utc).isoformat()
+        next_run = _advance(job, now)
         conn.execute(
-            """UPDATE cron_jobs SET last_run = ?, last_result = 'manual', runs = runs + 1, next_run = ?
+            """UPDATE cron_jobs SET last_run = ?, last_result = ?, runs = runs + 1, next_run = ?
                WHERE id = ?""",
-            (now, now, now, job_id),
+            (now, result_text[:2000], next_run, job_id),
         )
         conn.commit()
         return get_job(job_id)
     finally:
         conn.close()
+
+
+def _advance(job: dict, now_iso: str) -> str | None:
+    """Compute the next run time for a job after it fires."""
+    if job["schedule_type"] == "once":
+        return None
+    try:
+        return _parse_schedule(job["schedule_value"], now_iso)[2]
+    except ValueError:
+        return None
+
+
+def due_jobs() -> list[dict]:
+    """Active jobs whose next_run has passed."""
+    now = datetime.now(timezone.utc).isoformat()
+    conn = _conn()
+    try:
+        rows = conn.execute(
+            "SELECT * FROM cron_jobs WHERE status = 'active' AND next_run IS NOT NULL AND next_run <= ?",
+            (now,),
+        ).fetchall()
+        return [dict(r) for r in rows]
+    finally:
+        conn.close()
+
+
+def tick() -> int:
+    """Run every due job once. Returns how many fired."""
+    fired = 0
+    for job in due_jobs():
+        run_job(job["id"])
+        fired += 1
+    return fired
 
 
 def delete_job(job_id: str) -> bool:
@@ -412,6 +459,51 @@ def cmd_cron_status(args) -> None:
     ))
 
 
+def cmd_cron_tick(args) -> None:
+    """Run all due jobs once (for external schedulers / Task Scheduler)."""
+    from void.theme import ok, grey, dim
+
+    fired = tick()
+    if fired:
+        print(ok(f"Fired {fired} job(s)"))
+    else:
+        print(grey("No jobs due."))
+
+
+def cmd_cron_daemon(args) -> None:
+    """Run due jobs forever on a fixed interval."""
+    import time
+    from void.theme import ok, dim, err
+
+    interval = max(10, int(getattr(args, "interval", 60)))
+    print(ok(f"cron daemon running every {interval}s — Ctrl-C to stop"))
+    try:
+        while True:
+            n = tick()
+            if n:
+                print(dim(f"  fired {n} job(s)"))
+            time.sleep(interval)
+    except KeyboardInterrupt:
+        print()
+        print(dim("daemon stopped"))
+
+
+def cmd_cron_logs(args) -> None:
+    """Show last results for jobs that have run."""
+    from void.theme import header, grey, dim, green_bold, table
+
+    jobs = [j for j in list_jobs() if j.get("last_run")]
+    print(header("Job Results", 1))
+    if not jobs:
+        print(grey("No jobs have run yet."))
+        return
+    for j in jobs:
+        print(f"  {green_bold(j['id'][:8])}  {dim(j['last_run'][:16].replace('T', ' '))}")
+        print(f"    {j['prompt'][:60]}")
+        print(f"    {dim((j.get('last_result') or '')[:200])}")
+        print()
+
+
 # Dispatch
 _CRON_DISPATCH = {
     "list":    cmd_cron_list,
@@ -422,6 +514,9 @@ _CRON_DISPATCH = {
     "run":     cmd_cron_run,
     "remove":  cmd_cron_remove,
     "status":  cmd_cron_status,
+    "tick":    cmd_cron_tick,
+    "daemon":  cmd_cron_daemon,
+    "logs":    cmd_cron_logs,
 }
 
 

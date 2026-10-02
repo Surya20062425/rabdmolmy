@@ -43,13 +43,62 @@ class Model:
         if max_tokens:
             kwargs["max_tokens"] = int(max_tokens)
         if tools:
-            kwargs["tools"] = tools
-        resp = self._client.chat.completions.create(**kwargs)
+            # Strip non-standard fields (e.g. "dangerous") that some providers reject
+            clean_tools = []
+            for t in tools:
+                clean = {"type": "function", "function": {}}
+                fn = t.get("function", {})
+                clean["function"] = {
+                    "name": fn.get("name", ""),
+                    "description": fn.get("description", ""),
+                    "parameters": fn.get("parameters", {}),
+                }
+                clean_tools.append(clean)
+            kwargs["tools"] = clean_tools
+        resp = self._call_with_fallback(kwargs)
         choice = resp.choices[0].message
         return ChatResponse(
             content=choice.content,
             tool_calls=choice.tool_calls,
         )
+
+    def _call_with_fallback(self, kwargs: dict):
+        """Try the current model, then walk the fallback chain on failure.
+
+        Each fallback provider is retried with the same messages. The first
+        one that answers wins and becomes the active client for later turns.
+        """
+        from void.providers import get_fallback_chain, get_provider
+
+        try:
+            return self._client.chat.completions.create(**kwargs)
+        except Exception as first_err:
+            last = first_err
+            for name in get_fallback_chain():
+                cfg = get_provider(name) or {}
+                key = cfg.get("api_key")
+                if not key:
+                    continue
+                try:
+                    alt_kwargs = {"api_key": key}
+                    if cfg.get("base_url"):
+                        alt_kwargs["base_url"] = cfg["base_url"]
+                    client = OpenAI(**alt_kwargs)
+                    # Swap the model name if the provider declares models
+                    models = cfg.get("models") or []
+                    if models:
+                        kwargs = {**kwargs, "model": models[0]}
+                    resp = client.chat.completions.create(**kwargs)
+                    self._client = client
+                    self.api_key = key
+                    if cfg.get("base_url"):
+                        self.base_url = cfg["base_url"]
+                    self.model_name = kwargs["model"]
+                    return resp
+                except Exception as e:
+                    last = e
+                    continue
+            raise last
 
 
 class ChatResponse:

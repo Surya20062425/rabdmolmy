@@ -24,7 +24,7 @@ from void.tools.registry import register
 
 
 _HEADERS = {
-    "User-Agent": "Void/1.0 (CLI agent; +https://github.com/NousResearch/hermes-agent)",
+    "User-Agent": "Void/1.0 (CLI agent)",
 }
 
 

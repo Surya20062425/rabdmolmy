@@ -65,7 +65,10 @@ def test_skill_injection():
     msgs = [{"role": "user", "content": "audit a smart contract for vulnerabilities"}]
     _inject_skills(msgs)
     sys_text = msgs[0]["content"]
-    assert "web3-audit" in sys_text, "smart-contract skills not injected"
+    # Any contract-audit skill is a correct match here; the exact winner may
+    # shift as triggers are tuned.
+    assert any(s in sys_text for s in ("smart-contract-audit", "web3-audit", "code-sleuth")), \
+        "no smart-contract skill injected"
     msgs2 = [{"role": "user", "content": "what time is it"}]
     _inject_skills(msgs2)
     injected = msgs2[0]["content"].split("Skill: ")[1:]

@@ -1,18 +1,21 @@
-"""Void skills -- mirrors the Hermes skill catalog.
+"""Void skill catalog -- the skills Void knows about.
 Each skill has: name, description, tools it uses, when to trigger it.
 """
 
+import os
+from pathlib import Path
+
 SKILLS = {
-    # hermes-core
-    "hermes-agent": {
-        "name": "hermes-agent",
-        "description": "Use, configure, theme, extend Hermes Agent",
+    # void-core
+    "void-agent": {
+        "name": "void-agent",
+        "description": "Use, configure, theme, and extend Void",
         "tools": ["web_search", "system_shell", "system_read_file"],
-        "trigger": "hermes configuration, setup, theme",
+        "trigger": "void configuration, setup, theme",
     },
-    "hermes-providers": {
-        "name": "hermes-providers",
-        "description": "Add LLM providers to Hermes: keys, config, verify",
+    "void-providers": {
+        "name": "void-providers",
+        "description": "Add LLM providers to Void: keys, config, verify",
         "tools": ["system_read_file", "system_write_file", "system_shell"],
         "trigger": "add provider, api key, llm provider",
     },
@@ -162,21 +165,21 @@ SKILLS = {
         "tools": ["system_shell"],
         "trigger": "github pr, issue, review, repo, auth",
     },
-    "hermes-agent-skill-authoring": {
-        "name": "hermes-agent-skill-authoring",
+    "void-skill-authoring": {
+        "name": "void-skill-authoring",
         "description": "Author in-repo SKILL.md files: frontmatter and structure",
         "tools": ["system_write_file", "system_read_file"],
         "trigger": "skill authoring, write skill, SKILL.md",
     },
-    "hermes-cli-branding": {
-        "name": "hermes-cli-branding",
-        "description": "Hermes CLI branding and theming reference",
+    "void-theme-authoring": {
+        "name": "void-theme-authoring",
+        "description": "Void CLI branding and theming reference",
         "tools": ["system_read_file", "system_write_file"],
         "trigger": "branding, theme, cli colors",
     },
-    "inspecting-hermes-desktop-dom": {
-        "name": "inspecting-hermes-desktop-dom",
-        "description": "Read the live Hermes desktop DOM/CSS over CDP",
+    "inspecting-desktop-dom": {
+        "name": "inspecting-desktop-dom",
+        "description": "Read a live desktop app DOM/CSS over CDP",
         "tools": ["system_shell"],
         "trigger": "desktop dom, cd inspect, electron devtools",
     },
@@ -221,12 +224,6 @@ SKILLS = {
         "description": "Scaffold a Vite React TypeScript Tailwind web app",
         "tools": ["system_shell"],
         "trigger": "scaffold vite react tailwind",
-    },
-    "void-cli-branding": {
-        "name": "void-cli-branding",
-        "description": "Void CLI branding and theming reference",
-        "tools": ["system_read_file"],
-        "trigger": "void branding, void theme, void colors",
     },
 
     # bountyforge
@@ -618,7 +615,7 @@ SKILLS = {
         "name": "higgsfield-soul-id",
         "description": "Train a Soul Character: personalized model on a person",
         "tools": ["system_shell"],
-        "trigger": "soul id, character training, personalized model",
+        "trigger": "soul id, train a character, soul character",
     },
     "higgsfield-video-explainer": {
         "name": "higgsfield-video-explainer",
@@ -643,6 +640,42 @@ SKILLS = {
 
 def get_skill(name: str) -> dict | None:
     return SKILLS.get(name)
+
+
+VOID_SKILLS_DIR = Path(
+    os.environ.get("VOID_SKILLS_DIR", Path.home() / ".void" / "skills")
+)
+
+
+def find_skill_md(name: str) -> Path | None:
+    """Locate a skill's real SKILL.md on disk.
+
+    Checks both layouts Void supports: <dir>/<name>/SKILL.md (vendored) and
+    <dir>/<name>.md (flat installs).
+    """
+    if not VOID_SKILLS_DIR.exists():
+        return None
+    nested = VOID_SKILLS_DIR / name / "SKILL.md"
+    if nested.exists():
+        return nested
+    flat = VOID_SKILLS_DIR / f"{name}.md"
+    if flat.exists():
+        return flat
+    for p in VOID_SKILLS_DIR.rglob("SKILL.md"):
+        if p.parent.name == name:
+            return p
+    return None
+
+
+def load_skill_content(name: str) -> str | None:
+    """Full SKILL.md body for a catalog skill, or None if not on disk."""
+    p = find_skill_md(name)
+    if not p:
+        return None
+    try:
+        return p.read_text(encoding="utf-8")
+    except OSError:
+        return None
 
 
 def match_skills(query: str) -> list[dict]:

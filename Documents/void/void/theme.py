@@ -1,4 +1,4 @@
-"""Void theme — exact Hermes Agent terminal look.
+"""Void theme — neon green on black, DM Mono aesthetic.
 
 Layout (per the screenshot):
 - VOID logo: absolute top-left, outside/above the main box.
@@ -285,12 +285,12 @@ TOOLS_LINES = [
 ]
 
 SKILLS_LINES = [
-    "Void CLI:          claude-code, codex, computer-use, hermes-agent, +12 more",
+    "Void CLI:          void-agent, void-providers, void-skill-authoring, +12 more",
     "bountyforge:       bb-methodology, bug-bounty, code-sleuth, fizz, fizz-convert, +24 more",
     "creative:          architecture-diagram, ascii-video, banner-design, +14 more",
     "devops:            sdlc-review, velcel-deploy-fullstack",
     "email:             smail-inbox-triage, himalaya",
-    "general:           bountyforge, brag, hermes-plugins, higgsfield-brandkit, +23 more",
+    "general:           bountyforge, brag, void-plugins, higgsfield-brandkit, +23 more",
     "media:             gif-search, songsee, youtube-content",
     "note-taking:       obsidian",
     "productivity:      airtable, tex, career-artifacts, document-to-action-items, +14 more",
@@ -306,12 +306,12 @@ VERSION_HEADER = (
 
 SUMMARY_LINE = "18 tools · 130 skills · ./help for commands"
 
-WARNING_LINE = "14525 commits behind - run hermes update to update"
+WARNING_LINE = ""
 
-WELCOME_LINE = "Welcome to Hermes Agent! Type your message or /help for commands."
+WELCOME_LINE = "Welcome to Void. Type your message or /help for commands."
 
 TIP_LINE = (
-    "Tip: Hermes curator rollback restores shrills from a pre-run snapshot"
+    "Tip: void sessions export <id> saves a conversation to JSON"
     " - backups live under shrills/.curator_backups/."
 )
 
@@ -640,12 +640,12 @@ def _right_column() -> Text:
         t.append(line + "\n", style=Style(color=M_GREEN))
     t.append("\nAvailable Skills\n", style=Style(color=M_CYAN, bold=True))
     for line in [
-        "Void CLI: claude-code, codex, computer-use, hermes-agent, +2 more",
+        "Void CLI: void-agent, void-providers, void-skill-authoring, +2 more",
         "bountyforge: bb-methodology, bug-bounty, code-sleuth, fizz, fizz-convert, +24 more",
         "creative: architecture-diagram, ascii-video, banner-design, +14 more",
         "devops: sdlc-review, vercel-deploy-fullstack",
         "email: smail-inbox-triage, himalaya",
-        "general: bountyforge, brag, hermes-plugins, higgsfield-brandkit, +23 more",
+        "general: bountyforge, brag, void-plugins, higgsfield-brandkit, +23 more",
         "media: gif-search, songsee, youtube-content",
         "note-taking: obsidian",
         "productivity: airtable, tex, career-artifacts, document-to-action-items, +14 more",
@@ -724,6 +724,15 @@ def masked_api_key(key: str) -> str:
 
 def symbol(text: str = "") -> str:
     return f"{gb('s')}{w(':')} {g(text)}"
+
+
+def thinking() -> str:
+    return f"{gb('s')} {gd('thinking')}"
+
+
+def spinner_frame(i: int) -> str:
+    frames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
+    return f"{gb(frames[i % len(frames)])} {gd('thinking')}"
 
 
 def prompt_text(text: str) -> str:

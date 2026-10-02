@@ -1,6 +1,6 @@
 """Void session store — SQLite-based session persistence.
 
-Mirrors Hermes sessions: list, browse, rename, delete, export, prune, stats.
+Void session store: list, browse, rename, delete, export, prune, stats.
 """
 
 from __future__ import annotations

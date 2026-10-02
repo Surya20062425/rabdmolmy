@@ -1,4 +1,4 @@
-"""Memory tools — read/write persistent memory (Hermes-equivalent)."""
+"""Memory tools — read/write persistent memory."""
 
 import json
 from pathlib import Path

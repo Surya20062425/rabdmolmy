@@ -1,4 +1,4 @@
-"""Session tools — search/read past sessions (Hermes-equivalent)."""
+"""Session tools — search/read past sessions."""
 
 import json
 from pathlib import Path

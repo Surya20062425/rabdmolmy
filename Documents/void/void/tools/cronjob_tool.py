@@ -1,4 +1,4 @@
-"""Cronjob tools — manage scheduled jobs from the agent (Hermes-equivalent)."""
+"""Cronjob tools — manage scheduled jobs from the agent."""
 
 import json
 from pathlib import Path
@@ -28,9 +28,16 @@ def cronjob_list(limit: int = 20) -> dict:
 
 
 def cronjob_create(schedule: str, prompt: str) -> dict:
-    """Create a scheduled job. schedule like '30m', 'every 2h', '0 9 * * *'."""
+    """Create a scheduled job. schedule like '30m', 'every 2h', '0 9 * * *'.
+
+    Returns {"error": ...} on an unparseable schedule instead of raising —
+    tool handlers must return, not throw, so the agent loop keeps its turn.
+    """
     from void.commands.cron_cmd import create_job
-    return create_job(schedule, prompt)
+    try:
+        return create_job(schedule, prompt)
+    except ValueError as e:
+        return {"error": str(e)}
 
 
 def cronjob_delete(job_id: str) -> dict:

@@ -1,4 +1,4 @@
-"""Process tools — manage background processes (Hermes-equivalent)."""
+"""Process tools — manage background processes."""
 
 import json
 import subprocess

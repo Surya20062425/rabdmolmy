@@ -93,6 +93,7 @@ def run(model: Model, messages: list[dict], max_turns: int = 20) -> str:
                     _done.clear()
                     result = dispatch(name, args)
                     _done.set()
+                    _log("tool", f"{name} -> {result[:200]}")
                     messages.append({
                         "role": "tool",
                         "tool_call_id": tc.id,
@@ -103,6 +104,9 @@ def run(model: Model, messages: list[dict], max_turns: int = 20) -> str:
                 break
         else:
             result = "max turns reached — no final answer"
+    except Exception as e:
+        _log("error", f"agent loop: {e}")
+        raise
     finally:
         _done.set()
         t.join()
@@ -110,29 +114,63 @@ def run(model: Model, messages: list[dict], max_turns: int = 20) -> str:
     return result
 
 
+def _log(kind: str, message: str) -> None:
+    """Append to ~/.void/void.log (best effort, never fatal)."""
+    try:
+        from void.commands.system_cmd import log_event
+        log_event(kind, message)
+    except Exception:
+        pass
+
+
 def _inject_skills(messages: list[dict]) -> None:
-    """Prepend installed skills + catalog skills matching context as system context."""
+    """Prepend contextually-relevant skills as system context.
+
+    Only skills that match the user's message are injected — dumping the whole
+    library would blow the context window. Sources: catalog trigger matches,
+    then vendored skills whose name the message mentions.
+    """
+    from void.skills_catalog import load_skill_content, VOID_SKILLS_DIR
+
+    if not messages:
+        return
+    last = messages[-1].get("content", "").lower()
+    if not last:
+        return
+
     parts = []
-    # Installed skills
-    skills = discover_skills()
-    for s in skills:
-        path = s.get("path")
-        if not path:
+    seen = set()
+
+    # 1. Vendored skills named directly in the message — most relevant, first,
+    #    so they survive the size cap below.
+    if VOID_SKILLS_DIR.exists():
+        for d in VOID_SKILLS_DIR.iterdir():
+            if not d.is_dir() or len(d.name) < 4:
+                continue
+            if d.name.replace("-", " ") in last or d.name in last:
+                md = d / "SKILL.md"
+                if not md.exists():
+                    continue
+                try:
+                    parts.append(f"Skill: {d.name}\n{md.read_text(encoding='utf-8')}")
+                    seen.add(d.name)
+                except OSError:
+                    continue
+
+    # 2. Catalog skills matching a trigger
+    for name, info in CATALOG.items():
+        if name in seen or not _matches(last, info["trigger"]):
             continue
-        try:
-            content = Path(path).read_text(encoding="utf-8")
-        except Exception:
-            continue
-        parts.append(f"Skill: {s['name']}\n{content}")
-    # Catalog: inject matching skills based on last user message
-    if messages:
-        last = messages[-1].get("content", "").lower()
-        for name, info in CATALOG.items():
-            if _matches(last, info["trigger"]):
-                parts.append(f"Skill: {name}\n{info['description']}")
+        content = load_skill_content(name)
+        parts.append(f"Skill: {name}\n{content}" if content else f"Skill: {name}\n{info['description']}")
+        seen.add(name)
+
     if not parts:
         return
-    system_text = "\n\n---\n\n".join(parts)
+    # ponytail: cap total injected skill text so one huge SKILL.md can't blow
+    # the context window. Raise if you routinely need several large skills at once.
+    MAX_SKILL_CHARS = 60000
+    system_text = "\n\n---\n\n".join(parts)[:MAX_SKILL_CHARS]
     inserted = False
     for i, m in enumerate(messages):
         if m.get("role") == "system":

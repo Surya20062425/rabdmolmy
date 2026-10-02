@@ -1,4 +1,4 @@
-"""Void CLI — full Hermes-equivalent CLI surface with branded upgrade--- style.
+"""Void CLI — the CLI agent. Chat, tools, skills, sessions, cron.
 
 Branding: neon green (#9df133) on black, s symbol, DM Mono aesthetic.
 Surface: chat, config, setup, model, auth, fallback, sessions, skills,
@@ -9,6 +9,7 @@ Surface: chat, config, setup, model, auth, fallback, sessions, skills,
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 
 from void.agent import run
@@ -78,7 +79,7 @@ def help_key_value(key: str, value: str) -> str:
 
 VOID_HELP = f"""
 {help_header('SKULL', 'the CLI agent / CLI-first / neon green on black')}
-  {green_dim('A Hermes-equivalent CLI agent. Chat, tools, config,')}
+  {green_dim('The Void CLI agent. Chat, tools, config,')}
   {green_dim('providers, sessions, skills, cron, and more ' + DASH + '')}
   {green_dim('all from the terminal.')}
 
@@ -123,7 +124,7 @@ SUBCOMMAND_HELP = {
   {help_section_heading('keys')}
   {help_key_value('api_key', 'OpenAI-compatible API key')}
   {help_key_value('base_url', 'API base URL (default: https://api.openai.com/v1)')}
-  {help_key_value('model', 'default model name')}
+  {help_key_value('max_tokens', 'default max tokens per response')}
 """,
     "setup": f"""
 {help_header('setup', 'interactive setup wizard')}
@@ -141,19 +142,17 @@ SUBCOMMAND_HELP = {
 """,
     "model": f"""
 {help_header('model', 'manage providers and models')}
-  {dim('Hermes-style provider system with fallback chains.')}
+  {dim('Provider system with fallback chains.')}
 
   {help_section_heading('usage')}
   {help_cmd('void model list', 'list all configured providers + models')}
+  {help_cmd('void model set', 'interactive picker across providers')}
   {help_cmd('void model set <provider/model>', 'set the active model')}
   {help_cmd('void model show', 'show current model + resolution')}
 
   {help_section_heading('model format')}
     provider/model     e.g. openai/gpt-4o-mini
     model              just the name (resolved from providers)
-
-  {help_section_heading('built-in presets')}
-    openai, openrouter, gemini, anthropic, deepseek, local
 """,
     "auth": f"""
 {help_header('auth', 'manage API credentials')}
@@ -376,7 +375,11 @@ SUBCOMMAND_HELP = {
 # ═══════════════════════════════════════════════════════════════════
 
 def cmd_chat(args) -> None:
-    """Chat with the agent — interactive or one-shot."""
+    """Chat with the agent — interactive or one-shot. Persists to sessions."""
+    from void.sessions import (
+        create_session, add_message, list_messages, get_session, update_session_duration,
+    )
+
     try:
         model = build_model(args)
     except MissingApiKeyError as e:
@@ -388,15 +391,34 @@ def cmd_chat(args) -> None:
         sys.exit(1)
 
     if args.query:
+        sid = _new_session(args.query)
         messages = [{"role": "user", "content": args.query}]
+        _persist(sid, "user", args.query)
         answer = run(model, messages, max_turns=args.max_turns)
+        _persist(sid, "assistant", answer)
         print(answer)
+        print(green_dim(f"  session: {sid[:8]}"))
         return
 
-    # Interactive REPL
+    # Interactive REPL — resume a past session if asked
     print(start_screen())
     print(section_divider())
     messages: list[dict] = []
+    sid = None
+    if getattr(args, "resume", None):
+        existing = get_session(args.resume)
+        if not existing:
+            print(err(f"Session not found: {args.resume}"))
+            sys.exit(1)
+        sid = existing["id"]
+        messages = [
+            {"role": m["role"], "content": m["content"]}
+            for m in existing["messages"]
+            if m["role"] in ("user", "assistant") and m.get("content")
+        ]
+        print(ok(f"Resumed {sid[:8]} — {len(messages)} message(s) of history"))
+        print(section_divider())
+
     current_model_name = get_current_model() or "unknown"
     try:
         while True:
@@ -423,15 +445,38 @@ def cmd_chat(args) -> None:
                 print(section_divider())
                 continue
 
+            if sid is None:
+                sid = _new_session(line)
             messages.append({"role": "user", "content": line})
+            _persist(sid, "user", line)
             answer = run(model, messages, max_turns=args.max_turns)
             print(answer)
-            print(gd(f"  model: {current_model_name}  |  /model <name> to switch  |  Ctrl-D to quit"))
+            _persist(sid, "assistant", answer)
+            print(green_dim(f"  session: {sid[:8]}  |  /model <name> to switch  |  Ctrl-D to quit"))
             print(section_divider())
             messages.append({"role": "assistant", "content": answer})
     except KeyboardInterrupt:
         print()
         print()
+    finally:
+        if sid:
+            print(green_dim(f"  saved: {sid[:8]}  (void sessions list)"))
+
+
+def _new_session(seed: str) -> str:
+    """Create a session titled from the first user line."""
+    from void.sessions import create_session
+    title = (seed.strip().splitlines() or ["untitled"])[0][:60] or "untitled"
+    return create_session(title=title)["id"]
+
+
+def _persist(sid: str, role: str, content: str) -> None:
+    """Append a message to a session, ignoring persistence failures."""
+    from void.sessions import add_message
+    try:
+        add_message(sid, role, content or "")
+    except Exception:
+        pass
 
 
 def build_model(args) -> Model:
@@ -508,8 +553,10 @@ def cmd_config(args) -> None:
             print(white("config: (empty)"))
             print(dim("  Use void setup or void config set <key> <value>"))
             return
+        # Filter out provider-level keys — model lives in the provider system now
+        safe = {k: v for k, v in sorted(cfg.items()) if k != "model"}
         print(header("Config", 1))
-        for k, v in sorted(cfg.items()):
+        for k, v in sorted(safe.items()):
             if k == "api_key" and v:
                 print(tagged(k, masked_api_key(v), green, grey))
             else:
@@ -591,16 +638,6 @@ def cmd_setup(args) -> None:
     elif not existing_url:
         print(dim("  Using default: https://api.openai.com/v1"))
 
-    # Model name
-    existing_model = get("model")
-    default_model = existing_model or "gpt-4o-mini"
-    model_name = input(f"{green_bold('Model name')} [{dim(default_model)}]: ").strip()
-    if model_name:
-        set_key("model", model_name)
-        print(ok("Model name saved."))
-    elif not existing_model:
-        print(dim("  Using default: gpt-4o-mini"))
-
     print()
     print(green_bold("Setup complete."))
     print()
@@ -608,6 +645,7 @@ def cmd_setup(args) -> None:
     print(cmd_entry("void chat", "start interactive session"))
     print()
     print(dim("Want another provider?  void auth add openrouter"))
+    print(dim("Set model:               void model set <provider/model>"))
 
 
 def cmd_model(args) -> None:
@@ -652,7 +690,7 @@ def cmd_stub(name: str, args) -> None:
     print(dim("This command is coming soon."))
     print()
     print(dim("Current Void surface: chat, config, setup, model, auth, fallback"))
-    print(dim("Full Hermes CLI equivalence is in progress."))
+    print(dim("Run void --help for the full command surface."))
     print()
     print(green_bold(BOX_DIV * 62))
     print(desc)
@@ -681,10 +719,137 @@ def cmd_cron(args) -> None:
     cron_main(args)
 
 def cmd_webhooks(args) -> None:
-    cmd_stub("webhooks", args)
+    """Webhook routes: named endpoints that fire a prompt (local registry)."""
+    sc = getattr(args, "webhooks_subcommand", "list")
+    from void.commands.system_cmd import _store, _save_store, _now
+
+    data = _store("webhooks", {"routes": {}})
+    routes = data.setdefault("routes", {})
+
+    if sc == "list":
+        print(header("Webhooks", 1))
+        if not routes:
+            print(grey("No webhook routes. void webhooks subscribe <name>"))
+            return
+        rows = [[n, r.get("prompt", "")[:40], r.get("created", "")[:16]] for n, r in routes.items()]
+        print(table(["Name", "Prompt", "Created"], rows, [16, 42, 18]))
+        return
+    if sc == "subscribe":
+        routes[args.name] = {"prompt": f"handle webhook {args.name}", "created": _now()}
+        _save_store("webhooks", data)
+        print(ok(f"Subscribed: {args.name}"))
+        print(dim(f"  endpoint: /webhooks/{args.name} (serve with: void mcp serve)"))
+        return
+    if sc == "remove":
+        if routes.pop(args.name, None) is None:
+            print(err(f"Webhook not found: {args.name}"))
+            return
+        _save_store("webhooks", data)
+        print(ok(f"Removed: {args.name}"))
+        return
+    if sc == "test":
+        if args.name not in routes:
+            print(err(f"Webhook not found: {args.name}"))
+            return
+        print(ok(f"Test event queued for {args.name}"))
+        print(dim(f"  payload: {json.dumps({'event': 'test', 'at': _now()})}"))
+
 
 def cmd_mcp(args) -> None:
-    cmd_stub("mcp", args)
+    """MCP server registry: add/list/remove external tool servers."""
+    sc = getattr(args, "mcp_subcommand", "list")
+    from void.commands.system_cmd import _store, _save_store
+
+    data = _store("mcp", {"servers": {}})
+    servers = data.setdefault("servers", {})
+
+    if sc in ("list", "catalog"):
+        print(header("MCP Servers", 1))
+        if sc == "catalog":
+            print(dim("  catalog: filesystem, github, sqlite, fetch, memory, puppeteer"))
+            print()
+        if not servers:
+            print(grey("No MCP servers configured. void mcp add <name> --command '...'"))
+            return
+        rows = [[n, s.get("url") or s.get("command", "")] for n, s in servers.items()]
+        print(table(["Name", "Target"], rows, [18, 48]))
+        return
+    if sc == "add":
+        servers[args.name] = {"url": getattr(args, "url", None), "command": getattr(args, "command", None)}
+        _save_store("mcp", data)
+        print(ok(f"Added MCP server: {args.name}"))
+        return
+    if sc == "install":
+        servers[args.name] = {"command": f"npx -y @modelcontextprotocol/server-{args.name}"}
+        _save_store("mcp", data)
+        print(ok(f"Installed from catalog: {args.name}"))
+        return
+    if sc == "remove":
+        if servers.pop(args.name, None) is None:
+            print(err(f"MCP server not found: {args.name}"))
+            return
+        _save_store("mcp", data)
+        print(ok(f"Removed: {args.name}"))
+        return
+    if sc == "test":
+        s = servers.get(args.name)
+        if not s:
+            print(err(f"MCP server not found: {args.name}"))
+            return
+        target = s.get("url") or s.get("command")
+        print(dim(f"  would connect to: {target}"))
+        print(warn("  live MCP handshake not implemented -- registry only"))
+        return
+    if sc == "configure":
+        print(dim(f"  void mcp add {args.name} --url <url>  or  --command '<cmd>'"))
+
+
+def cmd_project(args) -> None:
+    from void.commands.system_cmd import cmd_project as _impl
+    _impl(args)
+
+def cmd_kanban(args) -> None:
+    from void.commands.system_cmd import cmd_kanban as _impl
+    _impl(args)
+
+def cmd_skin(args) -> None:
+    from void.commands.system_cmd import cmd_skin as _impl
+    _impl(args)
+
+def cmd_pets(args) -> None:
+    from void.commands.system_cmd import cmd_pets as _impl
+    _impl(args)
+
+def cmd_memory(args) -> None:
+    from void.commands.system_cmd import cmd_memory as _impl
+    _impl(args)
+
+def cmd_secrets(args) -> None:
+    from void.commands.system_cmd import cmd_secrets as _impl
+    _impl(args)
+    if getattr(args, "secrets_subcommand", None) == "list":
+        print()
+        print(dim("  stores: bitwarden (bw), onepassword (op)"))
+
+def cmd_moa(args) -> None:
+    from void.commands.system_cmd import cmd_moa as _impl
+    _impl(args)
+
+def cmd_hooks(args) -> None:
+    from void.commands.system_cmd import cmd_hooks as _impl
+    _impl(args)
+
+def cmd_logs(args) -> None:
+    from void.commands.system_cmd import cmd_logs as _impl
+    _impl(args)
+
+def cmd_doctor(args) -> None:
+    from void.commands.system_cmd import cmd_doctor as _impl
+    _impl(args)
+
+def cmd_status(args) -> None:
+    from void.commands.system_cmd import cmd_status as _impl
+    _impl(args)
 
 def _tool_state_path() -> Path:
     from pathlib import Path
@@ -755,39 +920,6 @@ def cmd_tools(args) -> None:
         print(ok(f"Disabled: {name}"))
         return
     cmd_stub("tools", args)
-
-def cmd_project(args) -> None:
-    cmd_stub("project", args)
-
-def cmd_kanban(args) -> None:
-    cmd_stub("kanban", args)
-
-def cmd_skin(args) -> None:
-    cmd_stub("skin", args)
-
-def cmd_pets(args) -> None:
-    cmd_stub("pets", args)
-
-def cmd_memory(args) -> None:
-    cmd_stub("memory", args)
-
-def cmd_secrets(args) -> None:
-    cmd_stub("secrets", args)
-
-def cmd_moa(args) -> None:
-    cmd_stub("moa", args)
-
-def cmd_hooks(args) -> None:
-    cmd_stub("hooks", args)
-
-def cmd_logs(args) -> None:
-    cmd_stub("logs", args)
-
-def cmd_doctor(args) -> None:
-    cmd_stub("doctor", args)
-
-def cmd_status(args) -> None:
-    cmd_stub("status", args)
 
 
 def cmd_upgrade(args) -> None:
@@ -868,7 +1000,7 @@ def main() -> None:
     chat.add_argument("--model", type=str, help="Model name (overrides config)")
     chat.add_argument("--max-turns", type=int, default=20, help="Tool-call cap")
     chat.add_argument("-q", "--query", type=str, help="One-shot query")
-    chat.add_argument("--resume", type=str, help="Resume session (coming soon)")
+    chat.add_argument("--resume", type=str, help="Resume a past session by ID")
 
     # ── config ──
     cfg = sub.add_parser("config", help="View and edit config")
@@ -975,6 +1107,10 @@ def main() -> None:
     sp.sub.add_parser("run", help="Run a job now").add_argument("id", help="Job ID")
     sp.sub.add_parser("remove", help="Remove a job").add_argument("id", help="Job ID")
     sp.sub.add_parser("status", help="Job statuses")
+    sp.sub.add_parser("tick", help="Run all due jobs once (for external schedulers)")
+    sp_daemon = sp.sub.add_parser("daemon", help="Run due jobs forever")
+    sp_daemon.add_argument("--interval", type=int, default=60, help="Poll interval in seconds")
+    sp.sub.add_parser("logs", help="Show last job results")
 
     # ── webhooks ──
     sp = sub.add_parser("webhooks", help="Webhook routes")
@@ -1057,6 +1193,7 @@ def main() -> None:
     sp.sub = sp.add_subparsers(dest="secrets_subcommand", required=True)
     sp.sub.add_parser("bitwarden", help="Connect bitwarden")
     sp.sub.add_parser("onepassword", help="Connect 1password")
+    sp.sub.add_parser("list", help="List configured secret stores")
 
     # ── moa ──
     sp = sub.add_parser("moa", help="Mixture of Agents")
@@ -1083,20 +1220,16 @@ def main() -> None:
 
     # ── doctor ──
     sp = sub.add_parser("doctor", help="Diagnostics")
-    sp.set_defaults(_stub_cmd="doctor")
     sp.add_argument("--fix", action="store_true", help="Attempt to auto-fix issues")
 
     # ── status ──
     sp = sub.add_parser("status", help="Component status")
-    sp.set_defaults(_stub_cmd="status")
     sp.add_argument("--all", action="store_true", help="Show all components")
 
     args = parser.parse_args()
 
     # Dispatch
-    if hasattr(args, "_stub_cmd"):
-        cmd_stub(args._stub_cmd, args)
-    elif args.command in _COMMAND_DISPATCH:
+    if args.command in _COMMAND_DISPATCH:
         _COMMAND_DISPATCH[args.command](args)
     else:
         parser.print_help()

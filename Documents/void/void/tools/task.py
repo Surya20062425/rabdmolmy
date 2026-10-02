@@ -1,4 +1,4 @@
-"""Task list tools — Hermes-equivalent todo tracking."""
+"""Task list tools — todo tracking."""
 
 import json
 from datetime import datetime, timezone
