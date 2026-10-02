@@ -392,6 +392,30 @@ def test_delegate_tools():
 
 # ── email tools ──────────────────────────────────────────────────────
 
+def test_email_parsing():
+    """The IMAP ENVELOPE parser -- previously every message was silently dropped."""
+    from void.tools.email import _parse_env, _extract_envelope
+
+    # Real FETCH response shape: note 'ENVELOPE (' with a space.
+    raw = ('8182 (RFC822.SIZE 933 ENVELOPE ("Sat, 03 Oct 2026 00:43:46 +0530" '
+           '"Void SMTP test" ((NIL NIL "b.7993974026" "gmail.com")) '
+           '((NIL NIL "b.7993974026" "gmail.com"))))')
+    env_str = _extract_envelope(raw)
+    assert env_str is not None, "envelope not found in FETCH response"
+    env = _parse_env(env_str)
+    assert env["subject"] == "Void SMTP test", env
+    assert env["date"].startswith("Sat"), env
+    assert "b.7993974026@gmail.com" in env["sender"], env
+    record("email_list", "parses ENVELOPE: subject/date/sender from real wire format", "PASS", "")
+
+    # Nested parens inside a subject must not truncate the envelope.
+    raw2 = ('1 (RFC822.SIZE 10 ENVELOPE ("Mon, 1 Jan 2026 00:00:00 +0000" '
+            '"re: (nested) subject" ((NIL NIL "a" "b.com")) ((NIL NIL "a" "b.com"))))')
+    env2 = _parse_env(_extract_envelope(raw2))
+    assert env2["subject"] == "re: (nested) subject", env2
+    record("email_list", "handles parens inside a quoted subject", "PASS", "")
+
+
 def test_email_tools():
     from void.tools.email import email_list, email_read, email_search, _smtp_host_for
 
@@ -412,8 +436,17 @@ def test_email_tools():
             r = fn(**args)
             if isinstance(r, dict) and "error" in r:
                 record(name, "no creds -> clear error (no crash)", "PASS", "")
-            elif isinstance(r, dict) and ("emails" in r or "body" in r or "subject" in r):
-                record(name, "live IMAP", "PASS", f"read message: {str(r.get('subject', r.get('count', '')))[:40]}")
+            elif isinstance(r, dict) and "body" in r:
+                # email_read: must return real content, not an empty shell
+                ok = bool(r.get("subject")) and bool(r.get("from"))
+                record(name, "reads a real message (subject + from present)",
+                       "PASS" if ok else "FAIL", "" if ok else str(r)[:120])
+            elif isinstance(r, dict) and "emails" in r:
+                # email_list/search: a bare empty list is the failure mode that
+                # hid the ENVELOPE bug -- require actual rows.
+                n = r.get("count", 0)
+                record(name, f"returns real rows ({n})", "PASS" if n > 0 else "FAIL",
+                       "" if n > 0 else "0 results -- parser or credentials broken")
             else:
                 record(name, "unexpected shape", "FAIL", str(r)[:160])
         except Exception as e:
@@ -450,6 +483,7 @@ def main() -> int:
         ("vision", test_vision_tools),
         ("delegate", test_delegate_tools),
         ("email", test_email_tools),
+        ("email-parsing", test_email_parsing),
         ("time", test_get_time),
     ]
     for label, fn in groups:

@@ -20,21 +20,125 @@ from void.tools.registry import register
 CONFIG = ensure_home() / "config.json"
 
 
+def _tokenize(s):
+    """Tokenize an IMAP ENVELOPE S-expression: parens, quoted strings, atoms."""
+    toks, i, n = [], 0, len(s)
+    while i < n:
+        c = s[i]
+        if c in "()":
+            toks.append(c)
+            i += 1
+        elif c == '"':
+            i += 1
+            buf = []
+            while i < n:
+                if s[i] == "\\" and i + 1 < n:
+                    buf.append(s[i + 1])
+                    i += 2
+                elif s[i] == '"':
+                    i += 1
+                    break
+                else:
+                    buf.append(s[i])
+                    i += 1
+            toks.append(("str", "".join(buf)))
+        elif c.isspace():
+            i += 1
+        else:
+            buf = []
+            while i < n and not s[i].isspace() and s[i] not in '()"':
+                buf.append(s[i])
+                i += 1
+            toks.append(("atom", "".join(buf)))
+    return toks
+
+
+def _extract_envelope(raw_str: str) -> str | None:
+    """Return the ENVELOPE S-expression from a FETCH response.
+
+    IMAP sends 'ENVELOPE (' with a space (not '(ENVELOPE'), so split on the
+    keyword, then balance parens respecting quoted strings.
+    """
+    idx = raw_str.find("ENVELOPE")
+    if idx == -1:
+        return None
+    start = raw_str.find("(", idx)
+    if start == -1:
+        return None
+    depth = 0
+    in_q = False
+    i = start
+    while i < len(raw_str):
+        c = raw_str[i]
+        if in_q:
+            if c == "\\":
+                i += 2
+                continue
+            if c == '"':
+                in_q = False
+        elif c == '"':
+            in_q = True
+        elif c == "(":
+            depth += 1
+        elif c == ")":
+            depth -= 1
+            if depth == 0:
+                return raw_str[start:i + 1]
+        i += 1
+    return None
+
+
+def _parse_sexpr(toks, i=0):
+    """Parse one S-expression starting at toks[i] == '('. Returns (node, next_i).
+
+    node is a list of children; leaves are ("str", v) / ("atom", v) tuples.
+    """
+    if i >= len(toks) or toks[i] != "(":
+        return None, i
+    i += 1
+    items = []
+    while i < len(toks) and toks[i] != ")":
+        if toks[i] == "(":
+            node, i = _parse_sexpr(toks, i)
+            items.append(node)
+        else:
+            items.append(toks[i])
+            i += 1
+    return items, i + 1  # skip ')'
+
+
+def _leaf(node) -> str:
+    """String value of a leaf node; '' for NIL or a nested list."""
+    if isinstance(node, tuple):
+        val = node[1]
+        return "" if val == "NIL" else val
+    return ""
+
+
 def _parse_env(s):
-    """Parse IMAP ENVELOPE string into a dict."""
+    """Parse an IMAP ENVELOPE S-expression into date/subject/sender.
+
+    ENVELOPE field order: date, subject, from, sender, reply-to, to, cc, bcc,
+    in-reply-to, message-id. `from` is (name adl mailbox host).
+    """
     env = {}
-    # date
-    m = __import__("re").search(r'\("([^"]+)"', s)
-    if m:
-        env["date"] = m.group(1)
-    # subject
-    m = __import__("re").search(r'\("([^"]+)" NIL', s)
-    if m:
-        env["subject"] = m.group(1)
-    # sender: NIL NIL name email
-    m = __import__("re").search(r'\(NIL NIL ([^ ]+) ([^)]+)\)', s)
-    if m:
-        env["sender"] = m.group(1) + " " + m.group(2)
+    toks = _tokenize(s)
+    node, _ = _parse_sexpr(toks, 0)
+    if not node:
+        return env
+    if len(node) > 0:
+        env["date"] = _leaf(node[0])
+    if len(node) > 1:
+        env["subject"] = _leaf(node[1])
+    if len(node) > 2 and isinstance(node[2], list) and node[2]:
+        # from = ( address* ) — a LIST of addresses; take the first.
+        addr_node = node[2][0]
+        if isinstance(addr_node, list):
+            name = _leaf(addr_node[0]) if addr_node else ""
+            mailbox = _leaf(addr_node[2]) if len(addr_node) > 2 else ""
+            host = _leaf(addr_node[3]) if len(addr_node) > 3 else ""
+            addr = f"{mailbox}@{host}" if mailbox and host else mailbox
+            env["sender"] = f"{name} <{addr}>" if name else addr
     return env
 
 
@@ -97,11 +201,9 @@ def email_list(folder="INBOX", limit=10, label="default",
                 continue
             raw = dt[0]
             raw_str = raw.decode() if isinstance(raw, bytes) else raw
-            # IMAP fetch returns: b'1 (RFC822.SIZE 123 ENVELOPE (...))'
-            env_part = raw_str.split("(ENVELOPE", 1)
-            if len(env_part) < 2:
+            env_str = _extract_envelope(raw_str)
+            if not env_str:
                 continue
-            env_str = "(ENVELOPE" + env_part[1].rsplit(")", 1)[0] + ")"
             env = _parse_env(env_str)
             out.append({
                 "uid": uid.decode() if isinstance(uid, bytes) else uid,
